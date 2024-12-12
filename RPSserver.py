@@ -18,6 +18,15 @@ server = None
 all_connected = []
 waiting_players = [] # make sure to not allow 2 players to use the same username at the same time
 
+rank_pts_req = {
+    'D' : 0,
+    'C' : 150,
+    'B' : 500,
+    'A' : 1200
+}
+
+server_running = True
+
 def check_player(username):
     cur.execute("SELECT * FROM players WHERE username=%s", (username,))
     player = cur.fetchone()
@@ -43,6 +52,11 @@ def get_rank_points(cur, username):
         return 0
     return result[0]
 
+def get_win_streak(username):
+    cur.execute("SELECT win_streak FROM players WHERE username = %s;", (username,))
+    WS = cur.fetchone()
+    return WS[0]
+
 def update_rank_points(cur, username, new_points):
     cur.execute("UPDATE players SET rank_points = %s WHERE username = %s;", (new_points, username))
     conn.commit()
@@ -51,25 +65,36 @@ def determine_winner(curr, P1, Choice1, P2, Choice2):
     rank1 = get_rank_points(cur, P1)
     rank2 = get_rank_points(cur, P2)
 
+    WS_P1 = get_win_streak(P1)
+    WS_P2 = get_win_streak(P2)
+
     if Choice1 == Choice2:
         return "Draw!", "Draw!"
     elif ((Choice1 == "rock" and Choice2 == "scissors") or 
           (Choice1 == "paper" and Choice2 == "rock") or 
           (Choice1 == "scissors" and Choice2 == "paper")):
-        updated_rank1 = rank1 + 10  
+        updated_rank1 = int( rank1 + 10  + (0.8 * WS_P1))
+        cur.execute("UPDATE players SET win_streak = %s WHERE username = %s;", (WS_P1 +1 ,P1))
+        conn.commit
         if( rank2 > 0):
             updated_rank2 = rank2 - 5
         else :
             updated_rank2 = 0
-        result = f"Player {P1} wins!"
+        cur.execute("UPDATE players SET win_streak = 0 WHERE username = %s;", (P2,))
+        conn.commit
+        result = f"Player {P1} wins! win streak : {WS_P1}"
         
     else:
-        updated_rank2 = rank2 + 10  
+        updated_rank2 = int( rank2 + 10  + (0.8 * WS_P2))
+        cur.execute("UPDATE players SET win_streak = %s WHERE username = %s;", (WS_P2 +1 ,P2))
+        conn.commit
         if (rank1 > 0):
             updated_rank1 = rank1 - 5
         else:
             updated_rank1 = 0
-        result = f"Player {P2} wins!"
+        cur.execute("UPDATE players SET win_streak = 0 WHERE username = %s;", (P1,))
+        conn.commit
+        result = f"Player {P2} wins! win streak :{WS_P2}"
 
     update_rank_points(cur, P1, updated_rank1)
     update_rank_points(cur, P2, updated_rank2)
@@ -83,22 +108,35 @@ def determine_winner(curr, P1, Choice1, P2, Choice2):
 def handle_players(client1, username1, client2, username2):
     try:
         while True:
-            # recieve p1's choice
-            choice1 = client1.recv(1024).decode('ascii')
-            if not choice1:
-                print(f"Connection from {username1} lost")
-                return
-            
-            # recieve p2's choice
-            choice2 = client2.recv(1024).decode('ascii')
-            if not choice2:
-                print(f"Connection from {username2} lost")
-                return
+            try:
+                # recieve p1's choice
+                choice1 = client1.recv(1024).decode('ascii')
+                if not choice1:
+                    print(f"Connection from {username1} lost")
+                    return
                 
+                # recieve p2's choice
+                choice2 = client2.recv(1024).decode('ascii')
+                if not choice2:
+                    print(f"Connection from {username2} lost")
+                    return
+            except OSError as e:
+                print(f"Error during communication: {e}")
+                break
+
             resultP1, resultP2 = determine_winner(cur,username1, choice1, username2, choice2)
 
-            client1.send(resultP1.encode('ascii'))
-            client2.send(resultP2.encode('ascii'))
+            try:
+                client1.send(resultP1.encode('ascii'))
+            except OSError as e:
+                print(f"Error sending data to {username1}: {e}")
+                break 
+
+            try:
+                client2.send(resultP2.encode('ascii'))
+            except OSError as e:
+                print(f"Error sending data to {username2}: {e}")
+                break  
 
     finally:
         client1.close()
@@ -109,7 +147,7 @@ def handle_client(client):
     global all_connected
     all_connected.append(client)
     username = client.recv(1024).decode('ascii').strip()
-    #check_player(username)
+    check_player(username)
     
     #Make sure no players try to use the same username
     if any(player[1] == username for player in waiting_players):
@@ -122,19 +160,31 @@ def handle_client(client):
 
     # matchmaking 2 players from the lounge
     if len(waiting_players) >= 2:
-        (player1, username1) = waiting_players.pop(0)
-        (player2, username2) = waiting_players.pop(0)
+        player1, username1 = random.choice(waiting_players) #randomly selecting the players
+        waiting_players.remove((player1, username1))
+
+        player2, username2 = random.choice(waiting_players)
+        waiting_players.remove((player2, username2))
+
         game_thread = threading.Thread(target=handle_players, args=(player1, username1, player2, username2))
         game_thread.start()
 
 def signal_handler(sig, frame):
+    global server_running
+
     print("\nShutting down the server...")
+
+    shutdown_message = "Server was shut down"
+    server_running = False
     for client in all_connected:
         try:
+            client.sendall(shutdown_message.encode('ascii'))
             client.shutdown(socket.SHUT_RDWR)
             client.close()
         except Exception as e:
             print(f"Error closing client: {e}")
+        finally:
+            all_connected.remove(client)
 
     if server:
         server.close()
@@ -151,7 +201,7 @@ def start_server():
     server.settimeout(1) 
     print("server started! waiting for connections...")
 
-    while True:
+    while server_running:
         try:
             client, _ = server.accept()
             client_thread = threading.Thread(target=handle_client, args=(client,))

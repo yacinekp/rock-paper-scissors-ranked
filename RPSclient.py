@@ -5,7 +5,6 @@ client.connect(('127.0.0.1', 11037))
 
 pseudo = input("Enter your username: ").strip()
 client.sendall(pseudo.encode('ascii'))
-
 try:
     while True:
 
@@ -14,12 +13,23 @@ try:
         if choice == "quit" or choice == 'q':
             break
 
-        if choice not in ["paper", "rock", "scissors"]:
-            print("Invalid choice. Please try again.")
-            continue
+        try:
+            if choice not in ["paper", "rock", "scissors"]:
+                print("Invalid choice. Please try again.")
+                continue
 
-        client.sendall(choice.encode())
-        response = client.recv(1024).decode()
+            client.sendall(choice.encode())
+            response = client.recv(1024).decode()
+            if not response:
+                    print("Server has shut down.")
+                    break
+            if response == "Server was shut down":
+                print("Server was shut down. Disconnecting...")
+                break
+        except socket.timeout:
+            print("Waiting for server response...")
+            continue 
+        
         print(response)
 
 except (ConnectionError, OSError):
