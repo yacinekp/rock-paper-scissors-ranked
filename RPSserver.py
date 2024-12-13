@@ -17,6 +17,7 @@ cur = conn.cursor()
 server = None
 all_connected = []
 waiting_players = [] # make sure to not allow 2 players to use the same username at the same time
+tournaments = {}
 
 rank_pts_req = {
     'D' : 0,
@@ -75,25 +76,25 @@ def determine_winner(curr, P1, Choice1, P2, Choice2):
           (Choice1 == "scissors" and Choice2 == "paper")):
         updated_rank1 = int( rank1 + 10  + (0.8 * WS_P1))
         cur.execute("UPDATE players SET win_streak = %s WHERE username = %s;", (WS_P1 +1 ,P1))
-        conn.commit
+        conn.commit()
         if( rank2 > 0):
             updated_rank2 = rank2 - 5
         else :
             updated_rank2 = 0
         cur.execute("UPDATE players SET win_streak = 0 WHERE username = %s;", (P2,))
-        conn.commit
+        conn.commit()
         result = f"Player {P1} wins! win streak : {WS_P1}"
         
     else:
         updated_rank2 = int( rank2 + 10  + (0.8 * WS_P2))
         cur.execute("UPDATE players SET win_streak = %s WHERE username = %s;", (WS_P2 +1 ,P2))
-        conn.commit
+        conn.commit()
         if (rank1 > 0):
             updated_rank1 = rank1 - 5
         else:
             updated_rank1 = 0
         cur.execute("UPDATE players SET win_streak = 0 WHERE username = %s;", (P1,))
-        conn.commit
+        conn.commit()
         result = f"Player {P2} wins! win streak :{WS_P2}"
 
     update_rank_points(cur, P1, updated_rank1)
@@ -106,6 +107,8 @@ def determine_winner(curr, P1, Choice1, P2, Choice2):
     return P1_message, P2_message
 
 def handle_players(client1, username1, client2, username2):
+    client1.send(f"Your opponent : {username2}".encode('ascii'))
+    client2.send(f"Your opponent : {username1}".encode('ascii'))
     try:
         while True:
             try:
@@ -155,19 +158,66 @@ def handle_client(client):
         client.close()
         return
     
-    waiting_players.append((client, username))
-    print(f"Connection from {username} has been established.")
+    game_mode = client.recv(1024).decode('ascii').strip()
 
-    # matchmaking 2 players from the lounge
-    if len(waiting_players) >= 2:
-        player1, username1 = random.choice(waiting_players) #randomly selecting the players
-        waiting_players.remove((player1, username1))
+    if game_mode == 'normal':
+        waiting_players.append((client, username))
+        print(f"{username} has entered normal mode.")
 
-        player2, username2 = random.choice(waiting_players)
-        waiting_players.remove((player2, username2))
+        # matchmaking 2 players from the lounge
+        if len(waiting_players) >= 2:
+            random.shuffle(waiting_players)  # randomizing the matchmaking
+            (player1, username1) = waiting_players.pop(0)
+            (player2, username2) = waiting_players.pop(0)
 
-        game_thread = threading.Thread(target=handle_players, args=(player1, username1, player2, username2))
-        game_thread.start()
+            game_thread = threading.Thread(target=handle_players, args=(player1, username1, player2, username2))
+            game_thread.start()
+    elif game_mode == 'tournament':
+        #recieving player join or create tournament
+        action = client.recv(1024).decode('ascii').strip()
+        if action == 'create':
+            # Receive tournament passwd
+            password = client.recv(1024).decode('ascii').strip()
+
+            #recieve nb of players set for the tournament
+            try:
+                nb_players = int(client.recv(1024).decode('ascii').strip())
+            except ValueError:
+                client.send("Invalid number of players.".encode('ascii'))
+                return
+            
+            if username in tournaments:
+                client.send("You already created a tournament.".encode('ascii'))
+            else:
+                tournaments[username] = {'password': password, 'players': [(client, username)], 'nb_players': nb_players}
+                client.send("Tournament created. Waiting for players...".encode('ascii'))
+                print(f"Tournament created by {username}.")
+        elif action == 'join':
+            password = client.recv(1024).decode('ascii').strip()
+
+            # Find the tournament by password
+            found_tournament = None
+            for host, info in tournaments.items():
+                if info['password'] == password:
+                    found_tournament = host
+                    break
+            if found_tournament:
+                tournaments[found_tournament]['players'].append((client, username))
+                client.send("Successfully joined the tournament.".encode('ascii'))
+                print(f"{username} joined {found_tournament}'s tournament.")
+                
+                # Check if nb players is reached
+                if len(tournaments[found_tournament]['players']) == tournaments[found_tournament]['nb_players']:
+                    players = tournaments[found_tournament]['players']
+                    random.shuffle(players)
+                    while len(players) >= 2:
+                        (player1, username1) = players.pop(0)
+                        (player2, username2) = players.pop(0)
+                        game_thread = threading.Thread(target=handle_players, args=(player1, username1, player2, username2))
+                        game_thread.start()
+                    del tournaments[found_tournament]  # Tournament completed, remove it
+            else:
+                client.send("Invalid tournament password.".encode('ascii'))
 
 def signal_handler(sig, frame):
     global server_running
@@ -176,14 +226,17 @@ def signal_handler(sig, frame):
 
     shutdown_message = "Server was shut down"
     server_running = False
-    for client in all_connected:
+    for client in all_connected[:]:
         try:
             client.sendall(shutdown_message.encode('ascii'))
             client.shutdown(socket.SHUT_RDWR)
-            client.close()
         except Exception as e:
-            print(f"Error closing client: {e}")
+            print(f"Error notifying client of shutdown: {e}")
         finally:
+            try:
+                client.close()  # Close the socket
+            except Exception as e:
+                print(f"Error closing client: {e}")
             all_connected.remove(client)
 
     if server:
